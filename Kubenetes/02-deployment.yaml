@@ -1,0 +1,271 @@
+---
+# ServiceAccount com anotação para Workload Identity (Azure AD)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-sa
+  namespace: production
+  labels:
+    app: api
+    app.kubernetes.io/name: api
+  annotations:
+    # Workload Identity: vincular a SA à Managed Identity do Azure
+    azure.workload.identity/client-id: "<MANAGED_IDENTITY_CLIENT_ID>"
+
+---
+# Deployment da API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: production
+  labels:
+    app: api
+    app.kubernetes.io/name: api
+    app.kubernetes.io/version: v1
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 3
+
+  # Rolling update: zero downtime
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: api
+      tier: backend
+
+  template:
+    metadata:
+      labels:
+        app: api
+        tier: backend
+        version: v1
+        azure.workload.identity/use: "true"
+      annotations:
+        # Scraping de métricas pelo Prometheus
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        # Forçar rollout quando o configmap muda (hash injetado pelo CI/CD)
+        checksum/config: "{{ .ConfigMapHash }}"
+
+    spec:
+      serviceAccountName: api-sa
+
+      # Distribuir pods entre nós e zonas de disponibilidade
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
+
+      # Security context do pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      terminationGracePeriodSeconds: 30
+
+      # Init container: aguarda banco de dados estar pronto
+      initContainers:
+        - name: wait-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z $DATABASE_HOST $DATABASE_PORT; do
+                echo "Aguardando banco de dados..."; sleep 3
+              done
+          env:
+            - name: DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: DATABASE_HOST
+            - name: DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: DATABASE_PORT
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+
+      containers:
+        - name: api
+          image: aksprodaks.azurecr.io/api:latest  # Substituir com seu ACR
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+
+          # ── Variáveis de ambiente ──────────────────────────────────────
+          envFrom:
+            # Todas as chaves do ConfigMap viram env vars
+            - configMapRef:
+                name: api-config
+
+          env:
+            # Segredos do Key Vault (via SecretProviderClass)
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-keyvault-synced   # Sincronizado pelo CSI Driver
+                  key: DB_PASSWORD
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-keyvault-synced
+                  key: API_KEY
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: api-keyvault-synced
+                  key: JWT_SECRET
+
+            # Downward API: informações do próprio pod
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          # ── Resource requests/limits (QoS: Burstable) ─────────────────
+          resources:
+            requests:
+              cpu: 250m      # 0.25 vCPU garantido pelo scheduler
+              memory: 256Mi
+            limits:
+              cpu: 500m      # 0.5 vCPU máximo (não excede este teto)
+              memory: 512Mi
+
+          # ── Health checks ──────────────────────────────────────────────
+          # startupProbe: bloqueia liveness/readiness até app inicializar
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12   # 60 s de tolerância na inicialização
+
+          # livenessProbe: reinicia o container se travar
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # readinessProbe: remove pod do load balancer se indisponível
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          # ── Volume mounts ──────────────────────────────────────────────
+          volumeMounts:
+            # ConfigMap como arquivo JSON
+            - name: app-config-volume
+              mountPath: /etc/config
+              readOnly: true
+            # Segredos do Key Vault montados como arquivos
+            - name: keyvault-secrets
+              mountPath: /mnt/secrets
+              readOnly: true
+            # Volume para logs temporários
+            - name: tmp-logs
+              mountPath: /var/log/api
+
+          # ── Security context do container ──────────────────────────────
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+
+          # Graceful shutdown: aguarda requisições em andamento
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+
+      volumes:
+        # ConfigMap montado como arquivo
+        - name: app-config-volume
+          configMap:
+            name: api-config
+            items:
+              - key: app.config.json
+                path: app.config.json
+            defaultMode: 0644
+
+        # Key Vault via CSI Driver
+        - name: keyvault-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: api-keyvault-secrets
+
+        # Volume efêmero para logs (read-only FS no container)
+        - name: tmp-logs
+          emptyDir: {}
+
+---
+# PodDisruptionBudget: garante HA durante manutenções do nó
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-pdb
+  namespace: production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api

@@ -1,0 +1,149 @@
+---
+# HorizontalPodAutoscaler: escala baseado em CPU, memória e métricas customizadas
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: production
+  labels:
+    app: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+
+  minReplicas: 3   # HA: mínimo 3 pods (1 por zona de disponibilidade)
+  maxReplicas: 20
+
+  metrics:
+    # Escalar por CPU
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Escala quando média de CPU > 70%
+
+    # Escalar por memória
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80  # Escala quando média de memória > 80%
+
+    # Escalar por métrica customizada (requests por segundo via Prometheus Adapter)
+    # Requer: prometheus-adapter instalado no cluster
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"
+
+  behavior:
+    # Scale UP rápido: adiciona até 4 pods por vez, com cooldown de 60s
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+      selectPolicy: Max
+
+    # Scale DOWN conservador: remove 1 pod por vez, com cooldown de 300s
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+
+---
+# NetworkPolicy: controle de tráfego de rede entre pods
+# Princípio: deny-all por padrão, allow-list explícito
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-network-policy
+  namespace: production
+  labels:
+    app: api
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Permitir tráfego do NGINX Ingress Controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Permitir scraping do Prometheus
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+
+    # Permitir comunicação interna dentro do namespace (ex: worker → api)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: production
+          podSelector:
+            matchLabels:
+              tier: backend
+
+  egress:
+    # Permitir saída para o banco de dados Azure (PostgreSQL)
+    - ports:
+        - protocol: TCP
+          port: 5432
+
+    # Permitir saída para o worker service interno
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: production
+          podSelector:
+            matchLabels:
+              app: worker
+      ports:
+        - protocol: TCP
+          port: 9090
+
+    # Permitir DNS (obrigatório para resolução de nomes)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Permitir HTTPS para APIs externas e Azure Services
+    - ports:
+        - protocol: TCP
+          port: 443

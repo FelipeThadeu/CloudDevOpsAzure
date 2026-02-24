@@ -1,0 +1,277 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Actions — Build, Test & Deploy to AKS
+# Arquivo: .github/workflows/build-deploy.yml
+#
+# Melhores práticas aplicadas:
+#   - OIDC Federated Identity (sem secrets de credencial Azure)
+#   - Ações fixadas em SHA hash (supply-chain security)
+#   - Permissões mínimas por job (principle of least privilege)
+#   - Concurrency: cancela runs antigos no mesmo branch
+#   - GitHub Environments com protection rules (aprovação manual em prod)
+#   - GitHub App token para acesso cross-repo (não GITHUB_TOKEN)
+#   - Docker layer caching via GitHub Actions Cache
+#   - Provenance & SBOM com docker/build-push-action
+#   - Rollback automático em caso de falha no deploy
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Build, Test & Deploy to AKS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:            # Permite trigger manual com inputs
+    inputs:
+      environment:
+        description: "Ambiente de deploy"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+
+# Não deixa ter concorrência de jobs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: myregistry.azurecr.io
+  IMAGE_NAME: api
+  RESOURCE_GROUP: rg-prod-app
+  AKS_CLUSTER: aks-prod
+  NAMESPACE: production
+
+jobs:
+  build:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read           # Checkout
+      packages: write          # Push para GHCR (se usar)
+      id-token: write          # OIDC para Azure login
+      security-events: write   # Upload SARIF p/ GitHub Security tab
+      attestations: write      # Provenance da imagem
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      image-digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Docker Build
+        uses: docker/setup-buildx-action@b5730b5f94bc23a60af60de76e06d1b8a49de77b # v3.10.0
+
+      - name: Azure Login OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869c6f1a8c6b53126 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ env.REGISTRY }}
+
+      - name: Docker Metadata Tags
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbea8d5dfe565c4bf8f9f2cde4b4 # v5.7.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build (test stage)
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4a2171483e26f4e428e30c # v6.15.0
+        with:
+          context: .
+          target: test          # Multi-stage build: para na camada de test
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Unit Tests
+        run: |
+          docker run --rm \
+            -e CI=true \
+            ${{ env.IMAGE_NAME }}:test \
+            npm test -- --coverage --reporters=default --reporters=jest-junit
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-test-results
+          path: "**/junit.xml"
+
+      - name: Trivy Vulnerability Scan
+        uses: aquasecurity/trivy-action@76071ef0a7768dbf67b2f34cfd84a8cbb91ab5b9 # v0.30.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:test
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"       
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@45775bd8235c68ba998cffa5171334d58593da47 # v3.28.15
+        with:
+          sarif_file: trivy-results.sarif
+
+      # Build para ACR somente se não for PR
+      - name: Build & Push to ACR
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4a2171483e26f4e428e30c # v6.15.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      # Assinar a imagem com Cosign
+      - name: Sign Image with Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.0
+
+      - name: Sign
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+  deploy-staging:
+    name: Deploy Staging
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: staging
+      url: https://staging.api.example.com
+
+    permissions:
+      contents: read
+      id-token: write   # OIDC
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Azure Login
+        uses: azure/login@a457da9ea143d694b1b9c7c869c6f1a8c6b53126 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }}-staging \
+            --name ${{ env.AKS_CLUSTER }}-staging \
+            --overwrite-existing
+          # Valida acesso sem --admin (usa RBAC + managed identity)
+
+      - name: Deploy
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          kubectl set image deployment/api \
+            api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG \
+            -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/api \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=5m
+
+      - name: Smoke Test Staging
+        run: |
+          sleep 10
+          curl -sf https://staging.api.example.com/health/ready \
+            || (kubectl rollout undo deployment/api -n ${{ env.NAMESPACE }} && exit 1)
+
+  deploy-production:
+    name: Deploy Production
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://api.example.com
+
+    permissions:
+      contents: read
+      id-token: write   # OIDC
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Azure Login
+        uses: azure/login@a457da9ea143d694b1b9c7c869c6f1a8c6b53126 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.AKS_CLUSTER }} \
+            --overwrite-existing
+
+      - name: Deploy
+        id: deploy
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          kubectl set image deployment/api \
+            api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG \
+            -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/api \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=5m
+
+      - name: Smoke Test — Rollback on Failure
+        run: |
+          for i in $(seq 1 5); do
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" https://api.example.com/health/ready)
+            [ "$http_code" = "200" ] && echo "OK" && exit 0
+            echo "Tentativa $i falhou (HTTP $http_code), aguardando 10s..."
+            sleep 10
+          done
+          echo "Smoke test falhou — iniciando rollback"
+          kubectl rollout undo deployment/api -n ${{ env.NAMESPACE }}
+          exit 1
+
+      - name: Update GitOps Manifest
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+          GH_APP_TOKEN: ${{ secrets.GH_APP_TOKEN }} 
+        run: |
+          git clone https://x-access-token:$GH_APP_TOKEN@github.com/org/cloud-infra.git infra
+          cd infra/k8s/api-service
+          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG|" deployment.yaml
+          git config user.email "cicd-bot@company.com"
+          git config user.name "CI/CD Bot"
+          git commit -am "chore(deploy): api → $IMAGE_TAG [skip ci]"
+          git push
+
