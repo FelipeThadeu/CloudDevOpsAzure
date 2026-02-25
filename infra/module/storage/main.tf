@@ -23,9 +23,10 @@ resource "azurerm_storage_account" "main" {
     }
   }
 
-  # Acesso apenas via VNet
+  # Acesso temporário habilitado para permitir a criação dos blobs/logs via Terraform
   network_rules {
-    default_action = "Deny"
+    default_action             = "Allow"
+    bypass                     = ["AzureServices"]
     virtual_network_subnet_ids = [
       var.aks_subnet_id,
       var.apps_subnet_id,
@@ -66,9 +67,9 @@ resource "azurerm_key_vault" "main" {
   enable_rbac_authorization       = true
   purge_protection_enabled        = var.enable_purge_protection
 
-  # Acesso apenas via VNet
+  # Acesso temporário habilitado
   network_acls {
-    default_action             = "Deny"
+    default_action             = "Allow"
     bypass                     = "AzureServices"
     virtual_network_subnet_ids = [
       var.aks_subnet_id,
@@ -125,10 +126,10 @@ resource "azurerm_container_registry" "main" {
 
 # MONITORING E DIAGNOSTICS
 
-# Diagnostics para Storage Account
+# Diagnostics para Storage Account (Blob Services)
 resource "azurerm_monitor_diagnostic_setting" "storage" {
   name                       = "storage-diagnostics"
-  target_resource_id         = azurerm_storage_account.main.id
+  target_resource_id         = "${azurerm_storage_account.main.id}/blobServices/default"
   log_analytics_workspace_id = var.log_analytics_workspace_id
 
   enabled_log {

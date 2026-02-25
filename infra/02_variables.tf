@@ -14,7 +14,7 @@ variable "environment" {
   description = "Ambiente (production, staging, development)"
   type        = string
   default     = "production"
-  
+
   validation {
     condition     = contains(["production", "staging", "development"], var.environment)
     error_message = "Ambiente deve ser: production, staging ou development"
@@ -27,7 +27,7 @@ variable "project_name" {
   default     = "cloud-app"
 }
 
-# ============ NETWORK ============
+# NETWORK
 
 variable "vnet_name" {
   description = "Nome da Virtual Network"
@@ -39,7 +39,7 @@ variable "vnet_cidr" {
   description = "CIDR da VNet (ex: 10.0.0.0/16)"
   type        = string
   default     = "10.0.0.0/16"
-  
+
   validation {
     condition     = can(cidrhost(var.vnet_cidr, 0))
     error_message = "Deve ser um CIDR válido"
@@ -64,7 +64,7 @@ variable "data_subnet_cidr" {
   default     = "10.0.3.0/24"
 }
 
-# ============ KUBERNETES ============
+# KUBERNETES 
 
 variable "cluster_name" {
   description = "Nome do cluster AKS"
@@ -82,7 +82,7 @@ variable "node_count" {
   description = "Número inicial de nós"
   type        = number
   default     = 3
-  
+
   validation {
     condition     = var.node_count >= 1 && var.node_count <= 100
     error_message = "node_count deve estar entre 1 e 100"
@@ -90,9 +90,9 @@ variable "node_count" {
 }
 
 variable "node_vm_size" {
-  description = "Tamanho da VM dos nós (ex: Standard_D4s_v3)"
+  description = "Tamanho da VM dos nós"
   type        = string
-  default     = "Standard_D4s_v3"
+  default     = "Standard_A1_v2" #Standard_D4s_v3
 }
 
 variable "enable_autoscaling" {
@@ -125,13 +125,13 @@ variable "network_policy_plugin" {
   default     = "azure"
 }
 
-# ============ STORAGE ============
+# STORAGE
 
 variable "storage_account_name" {
-  description = "Nome da Storage Account (deve ser único globalmente)"
+  description = "Nome da Storage Account"
   type        = string
-  default     = "stgprodapp"
-  
+  default     = "ftstgprodapp"
+
   validation {
     condition     = length(var.storage_account_name) >= 3 && length(var.storage_account_name) <= 24
     error_message = "Nome da Storage Account deve ter entre 3 e 24 caracteres"
@@ -150,12 +150,12 @@ variable "storage_replication" {
   default     = "GRS"
 }
 
-# ============ KEYVAULT ============
+# KEYVAULT 
 
 variable "keyvault_name" {
-  description = "Nome do Key Vault (deve ser único globalmente)"
+  description = "Nome do Key Vault"
   type        = string
-  default     = "kv-prod-app"
+  default     = "ft-kv-prod-app"
 }
 
 variable "enable_purge_protection" {
@@ -164,13 +164,13 @@ variable "enable_purge_protection" {
   default     = true
 }
 
-# ============ TAGS ============
+# TAGS
 
 variable "common_tags" {
   description = "Tags aplicadas a todos os recursos"
   type        = map(string)
   default = {
-    ManagedBy = "Terraform"
+    ManagedBy  = "Terraform"
     CostCenter = "Engineering"
   }
 }

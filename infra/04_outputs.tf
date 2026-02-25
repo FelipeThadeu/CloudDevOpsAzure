@@ -1,4 +1,4 @@
-# ============ KUBERNETES CLUSTER ============
+# KUBERNETES CLUSTER
 
 output "kubernetes_cluster_id" {
   description = "ID do cluster Kubernetes"
@@ -22,7 +22,7 @@ output "kubernetes_cluster_host" {
   sensitive   = true
 }
 
-# ============ NETWORK ============
+# NETWORK
 
 output "vnet_id" {
   description = "ID da Virtual Network"
@@ -39,7 +39,7 @@ output "aks_subnet_cidr" {
   value       = module.vnet.aks_subnet_cidr
 }
 
-# ============ STORAGE ============
+# STORAGE
 
 output "storage_account_id" {
   description = "ID da Storage Account"
@@ -56,7 +56,7 @@ output "storage_primary_blob_endpoint" {
   value       = module.storage.storage_primary_blob_endpoint
 }
 
-# ============ KEY VAULT ============
+# KEY VAULT
 
 output "key_vault_id" {
   description = "ID do Key Vault"
@@ -68,7 +68,7 @@ output "key_vault_uri" {
   value       = module.storage.key_vault_uri
 }
 
-# ============ CONTAINER REGISTRY ============
+# CONTAINER REGISTRY 
 
 output "container_registry_id" {
   description = "ID do Container Registry"
@@ -80,7 +80,7 @@ output "container_registry_login_server" {
   value       = module.storage.container_registry_login_server
 }
 
-# ============ MONITORING ============
+# MONITORING
 
 output "log_analytics_workspace_id" {
   description = "ID do Log Analytics Workspace"
@@ -93,7 +93,7 @@ output "application_insights_instrumentation_key" {
   sensitive   = true
 }
 
-# ============ RESOURCE GROUP ============
+# RESOURCE GROUP
 
 output "resource_group_name" {
   description = "Nome do Resource Group"
@@ -105,7 +105,7 @@ output "resource_group_id" {
   value       = azurerm_resource_group.main.id
 }
 
-# ============ MANAGED IDENTITY ============
+# MANAGED IDENTITY
 
 output "aks_identity_principal_id" {
   description = "Principal ID da identidade gerenciada do AKS"
@@ -116,8 +116,6 @@ output "aks_identity_client_id" {
   description = "Client ID da identidade gerenciada do AKS"
   value       = azurerm_user_assigned_identity.aks.client_id
 }
-
-# ============ ÚTIL PARA OPERAÇÕES ============
 
 output "kubectl_config_command" {
   description = "Comando para configurar kubectl"

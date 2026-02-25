@@ -1,4 +1,4 @@
-# ============ GRUPO DE RECURSOS PRINCIPAL ============
+# GRUPO DE RECURSOS PRINCIPAL
 
 resource "azurerm_resource_group" "main" {
   name     = var.resource_group_name
@@ -11,7 +11,7 @@ resource "azurerm_resource_group" "main" {
   }
 }
 
-# ============ IDENTIDADE GERENCIADA PARA AKS ============
+# IDENTIDADE GERENCIADA PARA AKS
 
 resource "azurerm_user_assigned_identity" "aks" {
   name                = "${var.cluster_name}-identity"
@@ -23,7 +23,7 @@ resource "azurerm_user_assigned_identity" "aks" {
   }
 }
 
-# ============ OBSERVABILIDADE ============
+# OBSERVABILIDADE
 
 resource "azurerm_log_analytics_workspace" "main" {
   name                = "${var.cluster_name}-logs"
@@ -67,7 +67,7 @@ module "vnet" {
   common_tags = var.common_tags
 }
 
-# ============ MÓDULO: STORAGE / KEYVAULT / ACR ============
+# STORAGE / KEYVAULT / ACR
 
 module "storage" {
   source = "./module/storage"
@@ -93,7 +93,7 @@ module "storage" {
   depends_on = [module.vnet]
 }
 
-# ============ MÓDULO: AKS ============
+# AKS
 
 module "aks" {
   source = "./module/aks"

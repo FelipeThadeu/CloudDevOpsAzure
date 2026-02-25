@@ -22,8 +22,8 @@ resource "azurerm_kubernetes_cluster" "main" {
     type            = "VirtualMachineScaleSets"
     vnet_subnet_id  = var.aks_subnet_id
 
-    # Zona de disponibilidade para HA
-    zones = ["1", "2", "3"]
+    # Zona de disponibilidade para HA (Desativado: sku/região atual não suporta)
+    # zones = ["1", "2", "3"]
 
     # Autoscaling
     enable_auto_scaling = var.enable_autoscaling
@@ -115,7 +115,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "workload" {
   os_disk_size_gb       = 30
   vnet_subnet_id        = var.aks_subnet_id
 
-  zones = ["1", "2", "3"]
+  # zones = ["1", "2", "3"]
 
   enable_auto_scaling = var.enable_autoscaling
   min_count            = var.enable_autoscaling ? 2 : null
